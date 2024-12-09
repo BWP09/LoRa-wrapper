@@ -1,5 +1,5 @@
-from typing import Self
 import machine
+from rs_result import Result, Ok, Err
 
 class LoRa:
     """A wrapper class for UART connected AT command driven LoRa modules"""
@@ -10,85 +10,68 @@ class LoRa:
     class RecvData:
         """Users are not meant to instantiate this class, only use it to access received data."""
 
-        def __init__(self, address: int, data: str, rssi: int, snr: int) -> None:
+        type AddressInt = int
+        type DataBytes = bytes
+        type RSSI_Int = int
+        type SNR_Int = int
+
+        def __init__(self, address: int, data: bytes, rssi: int, snr: int) -> None:
             self._address = address
             self._data = data
             self._rssi = rssi
             self._snr = snr
 
-            self._exception = None
-            self._raw_data = None
+        def unpack(self) -> tuple[AddressInt, DataBytes, RSSI_Int, SNR_Int]:
+            return self.address, self.data, self.rssi, self.snr
+
+        @property
+        def address(self):
+            return self._address
         
-        @classmethod
-        def _init_error(cls, exception: Exception, raw_data: bytes) -> Self:
-            err = cls(-1, "", 0, 0)
-
-            err._address = None
-            err._data = None
-            err._rssi = None
-            err._snr = None
-
-            err._exception = exception
-            err._raw_data = raw_data
-
-            return err
+        @property
+        def data(self):
+            return self._data
         
-        def is_error(self) -> bool:
-            """Returns whether the stored data represents an error (`true`) or data (`false`)"""
-
-            return self._exception is not None \
-                and self._raw_data is not None \
-                and self._address is None \
-                and self._data is None \
-                and self._rssi is None \
-                and self._snr is None
+        @property
+        def rssi(self):
+            return self._rssi
         
-        def get_data(self) -> tuple[int, str, int, int]:
-            """
-            Returns stored data. It is **highly** recommended to check that the data is not an error before calling this.
-            Example of checking for error::
+        @property
+        def snr(self):
+            return self._snr
 
-                data = lora.recv() # `lora` is an instance of the `LoRa` class
+    class RecvErr:
+        """Users are not meant to instantiate this class, only use it to access received data."""
 
-                if (err := data.get_error()):
-                    e, data = err
+        type RawDataBytes = bytes
 
-                else:
-                    address, data, rssi, snr = data.get_data()
-            
-            ## Return
-                returns a tuple containing the following:
-                    - `address`: an `int` which represent the address the data is from
-                    - `data`: a `str` holding the received data
-                    - `rssi`: an `int` with the RSSI value
-                    - `snr`: an `int` with the SNR value
-            """
-            
-            return (self._address, self._data, self._rssi, self._snr)
+        def __init__(self, exception: Exception, raw_data: bytes) -> None:
+            self._exception = exception
+            self._raw_data = raw_data
+
+        def unpack(self) -> tuple[Exception, RawDataBytes]:
+            return self.exception, self.raw_data
         
-        def get_error(self) -> None | tuple[Exception, bytes]:
-            """Returns any stored error or `None` if there is no error"""
-
-            if self._exception is not None \
-                and self._raw_data is not None \
-                and self._address is None \
-                and self._data is None \
-                and self._rssi is None \
-                and self._snr is None:
-
-                return (self._exception, self._raw_data)
+        @property
+        def exception(self):
+            return self._exception
         
-    def __init__(self, tx_pin_num: int, rx_pin_num: int, baudrate: int = 115200) -> None:
+        @property
+        def raw_data(self):
+            return self._raw_data
+        
+    def __init__(self, tx_pin_num: int, rx_pin_num: int, port: int = 0, baudrate: int = 115200) -> None:
         """
         Initialize the LoRa class and the internal UART.
 
         ### Parameters
             - `tx_pin_num`: the TX pin number
             - `rx_pin_num`: the RX pin number
+            - `port`: required for UART init, default is 0
             - `baudrate`: optional baudrate, default is `115200`
         """
         
-        self._uart = machine.UART(0, baudrate = baudrate, tx = machine.Pin(tx_pin_num), rx = machine.Pin(rx_pin_num))
+        self._uart = machine.UART(port, baudrate = baudrate, tx = machine.Pin(tx_pin_num), rx = machine.Pin(rx_pin_num))
 
         self._errors = {
             1: "There is not \"enter\" or 0x0D 0x0A in the end of the AT Command.",
@@ -106,7 +89,7 @@ class LoRa:
             20: "The time setting value of the \"Smart receiving power saving mode\" is not allowed."
         }
 
-    def command(self, command: str, ignore_errors: bool = False) -> bytes:
+    def command(self, command: str, ignore_errors: bool = False) -> Result[bytes, str]:
         """
         Run an AT command on LoRa module, optionally ignoring errors.
         
@@ -129,11 +112,11 @@ class LoRa:
         result = self._uart.read()
 
         if not ignore_errors and result.startswith(b"+ERR"):
-            raise self.CommandError(f"`{command}` caused error \"{self._errors[int((x := result.decode().strip()).split("=")[1])]}\" (`{x}`)")
+            return Err(f"`{command}` caused error \"{self._errors[int((x := result.decode().strip()).split("=")[1])]}\" (`{x}`)")
         
-        return result
+        return Ok(result)
     
-    def setup(self, network_id: int = 18, address: int = 0, spreading_factor: int = 9, bandwidth: int = 7, coding_rate: int = 1, programmed_preamble: int = 12) -> None:
+    def setup(self, network_id: int = 18, address: int = 0, spreading_factor: int = 9, bandwidth: int = 7, coding_rate: int = 1, programmed_preamble: int = 12, ignore_errors: bool = False) -> Result[None, str]:
         """
         Sets up the LoRa module, making it ready to use.
         based off of these docs: https://lemosint.com/wp-content/uploads/2021/11/Lora_AT_Command_RYLR998_RYLR498_EN.pdf
@@ -149,53 +132,90 @@ class LoRa:
         ### Raises
             - `CommandError`: will propagate up from `command` method calls
         """
+        
+        rets: list[Result[bytes, str]] = []
 
-        self.command("AT", ignore_errors = True)
-        self.command(f"AT+PARAMETER={spreading_factor},{bandwidth},{coding_rate},{programmed_preamble}")
-        self.command(f"AT+ADDRESS={address}")
-        self.command(f"AT+NETWORKID={network_id}")
+        rets.append(self.command("AT", ignore_errors = True))
+        rets.append(self.command(f"AT+PARAMETER={spreading_factor},{bandwidth},{coding_rate},{programmed_preamble}", ignore_errors = ignore_errors))
+        rets.append(self.command(f"AT+ADDRESS={address}", ignore_errors = ignore_errors))
+        rets.append(self.command(f"AT+NETWORKID={network_id}", ignore_errors = ignore_errors))
 
-    def reset(self) -> bytes:
+        def check[T, E](x: Result[T, E]) -> Err[E, T] | None:
+            match x:
+                case Err():
+                    return x
+
+        if any((err := check(ret)) for ret in rets):
+            if err is not None:
+                return err.propagate()
+        
+        return Ok(None)
+
+    def reset(self) -> Result[bytes, str]:
         """Runs the AT command to reset LoRa module"""
 
         return self.command("AT+RESET")
     
-    def send(self, address: int, data: str) -> bytes:
+    def send(self, address: int, data: str) -> Result[bytes, str]:
         """Runs send AT command on LoRa module, if `address` is 0, module will broadcast on all networks"""
 
         return self.command(f"AT+SEND={address},{len(data)},{data}")
 
-    def recv_raw(self) -> bytes:
+    def recv_raw(self) -> Result[bytes, str]:
         """A blocking function that waits for data to be received, then returns the raw bytes"""
-
-        while not self._uart.any():
-            pass
-
-        return self._uart.read()
         
-    def recv(self) -> RecvData:
-        """A blocking function that waits for data to be received, then returns the data"""
+        try:
+            while not self._uart.any():
+                pass
+
+            return Ok(self._uart.read())
+        
+        except Exception as e:
+            return Err(str(e))
+        
+    def recv(self) -> Result[RecvData, RecvErr]:
+        """
+        A blocking function that waits for data to be received, then returns the data in a `Result` type.
+        
+        ## Return
+            Returns a `Result` containing `RecvData` if successful, or `RecvErr` if not.
+        """
 
         raw = self.recv_raw()
 
-        try:
-            recv = raw.decode()[5:].split(",")
+        match raw:
+            case Ok():
+                raw = raw.ok()
+            
+            case Err():
+                return Err(self.RecvErr(self.CommandError(raw.err()), b""))
 
-            return self.RecvData(int(recv[0]), recv[2], int(recv[3]), int(recv[4]))
+        try:
+            recv = raw[5:].split(b",")
+
+            return Ok(self.RecvData(int(recv[0]), recv[2], int(recv[3]), int(recv[4])))
 
         except Exception as e:
-            return self.RecvData._init_error(e, raw)
+            return Err(self.RecvErr(e, raw))
 
-    def query(self, name: str):
+    def query(self, name: str) -> Result[str, str]:
         """Query LoRa module for variable value"""
 
-        return self.command(f"AT+{name}?").decode().strip().split("=")[1]
+        result = self.command(f"AT+{name}?")
 
-lora = LoRa(0, 1)
-data = lora.recv()
+        match result:
+            case Ok():
+                return Ok(result.ok().decode().strip().split("=")[1])
+            
+            case Err():
+                return result.propagate()
 
-if (err := data.get_error()):
-    e, data = err
+if __name__ == "__main__":
+    lora = LoRa(0, 1)
 
-else:
-    address, data, rssi, snr = data.get_data()
+    match lora.recv():
+        case Ok() as val:
+            address, data, rssi, snr =  val.ok().unpack()
+
+        case Err() as err:
+            err = err.err()
