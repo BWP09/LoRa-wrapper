@@ -1,5 +1,5 @@
 import machine
-from rs_result import Result, Ok, Err
+from rs_result import Result, Ok, Err, Check
 
 class LoRa:
     """A wrapper class for UART connected AT command driven LoRa modules"""
@@ -22,6 +22,16 @@ class LoRa:
             self._snr = snr
 
         def unpack(self) -> tuple[AddressInt, DataBytes, RSSI_Int, SNR_Int]:
+            """
+            Unpacks all internal data.
+            
+            ### Returns
+                - `AddressInt`: An `int` with the the received address value
+                - `DataBytes`: A `bytes` object with the received data
+                - `RSSI_Int`: An `int` with the signal RSSI
+                - `SNR_Int`: An `int` with the signal SNR
+            """
+
             return self.address, self.data, self.rssi, self.snr
 
         @property
@@ -50,6 +60,14 @@ class LoRa:
             self._raw_data = raw_data
 
         def unpack(self) -> tuple[Exception, RawDataBytes]:
+            """
+            Unpacks all internal data.
+            
+            ### Returns
+                - `Exception`: The caught error
+                - `RawDataBytes`: A `bytes` object with the received data, unprocessed
+            """
+
             return self.exception, self.raw_data
         
         @property
@@ -94,14 +112,11 @@ class LoRa:
         Run an AT command on LoRa module, optionally ignoring errors.
         
         ### Parameters
-            - `command`: the AT command to be executed on the module
-            - `ignore_errors`: whether any returned errors should be ignored or raised
+            - `command`: A `str` with the AT command to be executed on the module
+            - `ignore_errors`: A `bool`, whether any LoRa module errors should be ignored or returned as `Err(str)`
         
-        ### Return
-            Returns the module's response in bytes
-        
-        ### Raises
-            - `CommandError`: if `ignore_errors` is true, and if an error AT command was received from the module
+        ### Returns
+            a `Result` with `bytes` as `Ok` type and `str` as `Err` type
         """
 
         self._uart.write(f"{command}\r\n")
@@ -116,53 +131,62 @@ class LoRa:
         
         return Ok(result)
     
-    def setup(self, network_id: int = 18, address: int = 0, spreading_factor: int = 9, bandwidth: int = 7, coding_rate: int = 1, programmed_preamble: int = 12, ignore_errors: bool = False) -> Result[None, str]:
+    def setup(self, network_id: int = 18, address: int = 0, spreading_factor: int = 9, bandwidth: int = 7, coding_rate: int = 1, programmed_preamble: int = 12) -> Result[None, str]:
         """
         Sets up the LoRa module, making it ready to use.
         based off of these docs: https://lemosint.com/wp-content/uploads/2021/11/Lora_AT_Command_RYLR998_RYLR498_EN.pdf
         
         ### Parameters
-            - `network_id`: 3-15 + 18, This LoRa module's network ID.
-            - `address`: 0-65535, This LoRa module's address, must be unique.
-            - `spreading_factor`: 7-10, The larger the SF is, the better the sensitivity is, but the transmission time will take longer.
-            - `bandwidth`: 7-9, The smaller the bandwidth is, the better the sensitivity is, but the transmission time will take longer.
-            - `coding_rate`: 1-4, The coding rate will be the fastest if setting it as 1.
-            - `programmed_preamble`: (Recommended to not change) Preamble code. If the preamble code is bigger, it will result in the less opportunity of losing data. Generally preamble code can be set above 10 if under the permission of the transmission time.
+            - `network_id`: `3-15 + 18`, this LoRa module's network ID
+            - `address`: 0-65535, this LoRa module's address, must be unique
+            - `spreading_factor`: `7-10`, the larger the SF is, the better the sensitivity is, but the transmission time will take longer
+            - `bandwidth`: `7-9`, the smaller the bandwidth is, the better the sensitivity is, but the transmission time will take longer
+            - `coding_rate`: `1-4`, the coding rate will be the fastest if setting it as 1
+            - `programmed_preamble`: Preamble code. If the preamble code is bigger, it will result in the less opportunity of losing data. Generally preamble code can be set above 10 if under the permission of the transmission time
         
-        ### Raises
-            - `CommandError`: will propagate up from `command` method calls
+        ### Returns
+            a `Result` with `None` as `Ok` type and `str` as `Err` type
         """
         
         rets: list[Result[bytes, str]] = []
 
         rets.append(self.command("AT", ignore_errors = True))
-        rets.append(self.command(f"AT+PARAMETER={spreading_factor},{bandwidth},{coding_rate},{programmed_preamble}", ignore_errors = ignore_errors))
-        rets.append(self.command(f"AT+ADDRESS={address}", ignore_errors = ignore_errors))
-        rets.append(self.command(f"AT+NETWORKID={network_id}", ignore_errors = ignore_errors))
+        rets.append(self.command(f"AT+PARAMETER={spreading_factor},{bandwidth},{coding_rate},{programmed_preamble}"))
+        rets.append(self.command(f"AT+ADDRESS={address}"))
+        rets.append(self.command(f"AT+NETWORKID={network_id}"))
 
-        def check[T, E](x: Result[T, E]) -> Err[E, T] | None:
-            match x:
-                case Err():
-                    return x
-
-        if any((err := check(ret)) for ret in rets):
-            if err is not None:
-                return err.propagate()
+        if (err := Check.first_err(rets)) is not None:
+            return err.propagate()      
         
         return Ok(None)
 
     def reset(self) -> Result[bytes, str]:
-        """Runs the AT command to reset LoRa module"""
+        """
+        Runs the AT command to reset LoRa module
+        
+        ### Returns
+            a `Result` from the `LoRa.command` method call
+        """
 
         return self.command("AT+RESET")
     
     def send(self, address: int, data: str) -> Result[bytes, str]:
-        """Runs send AT command on LoRa module, if `address` is 0, module will broadcast on all networks"""
+        """
+        Runs the send AT command on LoRa module, if `address` is 0, module will broadcast on all networks.
+        
+        ### Returns
+            a `Result` from the `LoRa.command` method call
+        """
 
         return self.command(f"AT+SEND={address},{len(data)},{data}")
 
     def recv_raw(self) -> Result[bytes, str]:
-        """A blocking function that waits for data to be received, then returns the raw bytes"""
+        """
+        A blocking function that waits for data to be received, capturing raw bytes.
+
+        ### Returns
+            a `Result` with `bytes` as `Ok` type and `str` as `Err` type
+        """
         
         try:
             while not self._uart.any():
@@ -175,10 +199,10 @@ class LoRa:
         
     def recv(self) -> Result[RecvData, RecvErr]:
         """
-        A blocking function that waits for data to be received, then returns the data in a `Result` type.
+        A blocking function that waits for data to be received, parsed and wrapped in helper a class.
         
         ## Return
-            Returns a `Result` containing `RecvData` if successful, or `RecvErr` if not.
+            a `Result` with `RecvData` as `Ok` type and `RecvErr` as `Err` type
         """
 
         raw = self.recv_raw()
@@ -198,14 +222,14 @@ class LoRa:
         except Exception as e:
             return Err(self.RecvErr(e, raw))
 
-    def query(self, name: str) -> Result[str, str]:
+    def query(self, name: str) -> Result[bytes, str]:
         """Query LoRa module for variable value"""
 
         result = self.command(f"AT+{name}?")
 
         match result:
             case Ok():
-                return Ok(result.ok().decode().strip().split("=")[1])
+                return Ok(result.ok().strip().split(b"=")[1])
             
             case Err():
                 return result.propagate()
