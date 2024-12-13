@@ -1,5 +1,5 @@
-import machine
-from rs_result import Result, Ok, Err, Check
+import machine, utime
+from .rs_result import Result, Ok, Err, Check
 
 class LoRa:
     """A wrapper class for UART connected AT command driven LoRa modules"""
@@ -10,10 +10,10 @@ class LoRa:
     class RecvData:
         """Users are not meant to instantiate this class, only use it to access received data."""
 
-        type AddressInt = int
-        type DataBytes = bytes
-        type RSSI_Int = int
-        type SNR_Int = int
+        AddressInt = int
+        DataBytes = bytes
+        RSSI_Int = int
+        SNR_Int = int
 
         def __init__(self, address: int, data: bytes, rssi: int, snr: int) -> None:
             self._address = address
@@ -53,7 +53,7 @@ class LoRa:
     class RecvErr:
         """Users are not meant to instantiate this class, only use it to access received data."""
 
-        type RawDataBytes = bytes
+        RawDataBytes = bytes
 
         def __init__(self, exception: Exception, raw_data: bytes) -> None:
             self._exception = exception
@@ -119,7 +119,7 @@ class LoRa:
             a `Result` with `bytes` as `Ok` type and `str` as `Err` type
         """
 
-        self._uart.write(f"{command}\r\n")
+        self._uart.write(f"{command}{chr(0x0D) + chr(0x0A)}".encode())
 
         while not self._uart.any():
             pass
@@ -205,14 +205,22 @@ class LoRa:
             a `Result` with `RecvData` as `Ok` type and `RecvErr` as `Err` type
         """
 
-        raw = self.recv_raw()
+        result = self.recv_raw()
+        raw = b""
 
-        match raw:
-            case Ok():
-                raw = raw.ok()
+        # Removed due to MicroPython not supporting match-case :(
+        # match raw:
+        #     case Ok():
+        #         raw = raw.ok()
             
-            case Err():
-                return Err(self.RecvErr(self.CommandError(raw.err()), b""))
+        #     case Err():
+        #         return Err(self.RecvErr(self.CommandError(raw.err()), b""))
+
+        if Check.is_ok(result):
+            raw = result.ok()
+            
+        if Check.is_err(result):
+            return Err(self.RecvErr(self.CommandError(result.err()), b""))
 
         try:
             recv = raw[5:].split(b",")
@@ -227,19 +235,18 @@ class LoRa:
 
         result = self.command(f"AT+{name}?")
 
-        match result:
-            case Ok():
-                return Ok(result.ok().strip().split(b"=")[1])
+        # Removed due to MicroPython not supporting match-case :(
+        # match result:
+        #     case Ok():
+        #         return Ok(result.ok().strip().split(b"=")[1])
             
-            case Err():
-                return result.propagate()
+        #     case Err():
+        #         return result.propagate()
 
-if __name__ == "__main__":
-    lora = LoRa(0, 1)
+        if Check.is_ok(result):
+            return Ok(result.ok().strip().split(b"=")[1])
+            
+        if Check.is_err(result):
+            return result.propagate()
 
-    match lora.recv():
-        case Ok() as val:
-            address, data, rssi, snr =  val.ok().unpack()
-
-        case Err() as err:
-            err = err.err()
+        return result
