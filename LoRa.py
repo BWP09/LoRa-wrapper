@@ -138,7 +138,7 @@ class LoRa:
                 if part.startswith(b"+RCV="):
                     self._recv_buf.append(part)
 
-                else:
+                elif part:
                     raw = part
 
             if not ignore_errors and raw.startswith(b"+ERR"):
