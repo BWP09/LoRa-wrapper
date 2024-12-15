@@ -241,7 +241,7 @@ class LoRa:
                 if part.startswith(b"+RCV="):
                     self._recv_buf.append(part)
                 
-                else:
+                elif part:
                     return Err(self.RecvErr(self.EmptyRecvError("non +RCV data"), part))
 
         if Check.is_err(result):
