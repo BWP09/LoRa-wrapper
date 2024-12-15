@@ -6,6 +6,9 @@ class LoRa:
 
     class CommandError(Exception): 
         """An exception class for AT command errors"""
+    
+    class UARTTimeoutError(Exception):
+        """An exception class for command timeouts"""
 
     class RecvData:
         """Users are not meant to instantiate this class, only use it to access received data."""
@@ -180,32 +183,41 @@ class LoRa:
 
         return self.command(f"AT+SEND={address},{len(data)},{data}")
 
-    def recv_raw(self) -> Result[bytes, str]:
+    def recv_raw(self, timeout: int = 0) -> Result[bytes, Exception]:
         """
         A blocking function that waits for data to be received, capturing raw bytes.
+
+        ### Parameters
+            - `timeout`: An `int` with a default of 0 (no timeout)
 
         ### Returns
             a `Result` with `bytes` as `Ok` type and `str` as `Err` type
         """
+
+        start_time = utime.time()
         
         try:
             while not self._uart.any():
-                pass
+                if timeout != 0 and (utime.time() - start_time) >= timeout:
+                    return Err(self.UARTTimeoutError(f"`recv_raw` exceeded the timeout value of {timeout} seconds"))
 
             return Ok(self._uart.read())
         
         except Exception as e:
-            return Err(str(e))
+            return Err(e)
         
-    def recv(self) -> Result[RecvData, RecvErr]:
+    def recv(self, timeout: int = 0) -> Result[RecvData, RecvErr]:
         """
         A blocking function that waits for data to be received, parsed and wrapped in helper a class.
+
+        ### Parameters
+            - `timeout`: An `int` with a default of 0 (no timeout)
         
         ## Return
             a `Result` with `RecvData` as `Ok` type and `RecvErr` as `Err` type
         """
 
-        result = self.recv_raw()
+        result = self.recv_raw(timeout = timeout)
         raw = b""
 
         # Removed due to MicroPython not supporting match-case :(
@@ -220,7 +232,7 @@ class LoRa:
             raw = result.ok()
             
         if Check.is_err(result):
-            return Err(self.RecvErr(self.CommandError(result.err()), b""))
+            return Err(self.RecvErr(result.err(), b""))
 
         try:
             recv = raw[5:].split(b",")
