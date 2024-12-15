@@ -9,6 +9,9 @@ class LoRa:
     
     class UARTTimeoutError(Exception):
         """An exception class for command timeouts"""
+    
+    class EmptyRecvError(Exception):
+        """An exception class for empty received data"""
 
     class RecvData:
         """Users are not meant to instantiate this class, only use it to access received data."""
@@ -94,6 +97,8 @@ class LoRa:
         
         self._uart = machine.UART(port, baudrate = baudrate, tx = machine.Pin(tx_pin_num), rx = machine.Pin(rx_pin_num))
 
+        self._recv_buf: list[bytes] = []
+
         self._errors = {
             1: "There is not \"enter\" or 0x0D 0x0A in the end of the AT Command.",
             2: "The head of AT command is not \"AT\" string.",
@@ -110,7 +115,7 @@ class LoRa:
             20: "The time setting value of the \"Smart receiving power saving mode\" is not allowed."
         }
 
-    def command(self, command: str, ignore_errors: bool = False) -> Result[bytes, str]:
+    def command(self, command: str, ignore_errors: bool = False, timeout: int = 0) -> Result[bytes, Exception]:
         """
         Run an AT command on LoRa module, optionally ignoring errors.
         
@@ -124,17 +129,29 @@ class LoRa:
 
         self._uart.write(f"{command}{chr(0x0D) + chr(0x0A)}".encode())
 
-        while not self._uart.any():
-            pass
+        result = self.read_raw(timeout = timeout)
 
-        result = self._uart.read()
+        if Check.is_ok(result):
+            raw = result.ok()
+            
+            for part in raw.split(b"\r\n"):                                                              # TODO NEEDS FURTHER TESTING
+                if part.startswith(b"+RCV="):
+                    self._recv_buf.append(part)
 
-        if not ignore_errors and result.startswith(b"+ERR"):
-            return Err(f"`{command}` caused error \"{self._errors[int((x := result.decode().strip()).split("=")[1])]}\" (`{x}`)")
+                else:
+                    raw = part
+
+            if not ignore_errors and raw.startswith(b"+ERR"):
+                return Err(self.CommandError(f"`{command}` caused error \"{self._errors[int((x := raw.decode().strip()).split("=")[1])]}\" (`{x}`)"))
+            
+            return Ok(raw)
+
+        if Check.is_err(result):
+            return result.propagate()
         
-        return Ok(result)
+        return Ok(b"")
     
-    def setup(self, network_id: int = 18, address: int = 0, spreading_factor: int = 9, bandwidth: int = 7, coding_rate: int = 1, programmed_preamble: int = 12) -> Result[None, str]:
+    def setup(self, network_id: int = 18, address: int = 0, spreading_factor: int = 9, bandwidth: int = 7, coding_rate: int = 1, programmed_preamble: int = 12) -> Result[None, Exception]:
         """
         Sets up the LoRa module, making it ready to use.
         based off of these docs: https://lemosint.com/wp-content/uploads/2021/11/Lora_AT_Command_RYLR998_RYLR498_EN.pdf
@@ -151,7 +168,7 @@ class LoRa:
             a `Result` with `None` as `Ok` type and `str` as `Err` type
         """
         
-        rets: list[Result[bytes, str]] = []
+        rets: list[Result[bytes, Exception]] = []
 
         rets.append(self.command("AT", ignore_errors = True))
         rets.append(self.command(f"AT+PARAMETER={spreading_factor},{bandwidth},{coding_rate},{programmed_preamble}"))
@@ -163,7 +180,7 @@ class LoRa:
         
         return Ok(None)
 
-    def reset(self) -> Result[bytes, str]:
+    def reset(self) -> Result[bytes, Exception]:
         """
         Runs the AT command to reset LoRa module
         
@@ -173,7 +190,7 @@ class LoRa:
 
         return self.command("AT+RESET")
     
-    def send(self, address: int, data: str) -> Result[bytes, str]:
+    def send(self, address: int, data: str) -> Result[bytes, Exception]:
         """
         Runs the send AT command on LoRa module, if `address` is 0, module will broadcast on all networks.
         
@@ -183,15 +200,15 @@ class LoRa:
 
         return self.command(f"AT+SEND={address},{len(data)},{data}")
 
-    def recv_raw(self, timeout: int = 0) -> Result[bytes, Exception]:
+    def read_raw(self, timeout: int = 0) -> Result[bytes, Exception]:
         """
-        A blocking function that waits for data to be received, capturing raw bytes.
+        A blocking function that reads data from UART, capturing raw bytes.
 
         ### Parameters
             - `timeout`: An `int` with a default of 0 (no timeout)
 
         ### Returns
-            a `Result` with `bytes` as `Ok` type and `str` as `Err` type
+            a `Result` with `bytes` as `Ok` type and `Exception` as `Err` type
         """
 
         start_time = utime.time()
@@ -199,7 +216,7 @@ class LoRa:
         try:
             while not self._uart.any():
                 if timeout != 0 and (utime.time() - start_time) >= timeout:
-                    return Err(self.UARTTimeoutError(f"`recv_raw` exceeded the timeout value of {timeout} seconds"))
+                    return Err(self.UARTTimeoutError(f"`read_raw` exceeded the timeout value of {timeout} seconds"))
 
             return Ok(self._uart.read())
         
@@ -217,33 +234,34 @@ class LoRa:
             a `Result` with `RecvData` as `Ok` type and `RecvErr` as `Err` type
         """
 
-        result = self.recv_raw(timeout = timeout)
-        raw = b""
+        result = self.read_raw(timeout = timeout)
 
-        # Removed due to MicroPython not supporting match-case :(
-        # match raw:
-        #     case Ok():
-        #         raw = raw.ok()
-            
-        #     case Err():
-        #         return Err(self.RecvErr(self.CommandError(raw.err()), b""))
+        if Check.is_ok(result):           
+            for part in result.ok().split(b"\r\n"):
+                if part.startswith(b"+RCV="):
+                    self._recv_buf.append(part)
+                
+                else:
+                    return Err(self.RecvErr(self.EmptyRecvError("non +RCV data"), part))
 
-        if Check.is_ok(result):
-            raw = result.ok()
-            
         if Check.is_err(result):
             return Err(self.RecvErr(result.err(), b""))
 
+        if not self._recv_buf:
+            return Err(self.RecvErr(self.EmptyRecvError("recv buffer is empty"), b""))
+
+        item = self._recv_buf.pop(0)
+
         try:
-            recv = raw[5:].split(b",")
+            recv = item[5:].split(b",")
 
             return Ok(self.RecvData(int(recv[0]), recv[2], int(recv[3]), int(recv[4])))
 
         except Exception as e:
-            return Err(self.RecvErr(e, raw))
+            return Err(self.RecvErr(e, item))
 
-    def query(self, name: str) -> Result[bytes, str]:
-        """Query LoRa module for variable value"""
+    def query(self, name: str) -> Result[bytes, Exception]:
+        """Query LoRa module for variable value."""
 
         result = self.command(f"AT+{name}?")
 
@@ -261,4 +279,4 @@ class LoRa:
         if Check.is_err(result):
             return result.propagate()
 
-        return result
+        return Ok(b"")
